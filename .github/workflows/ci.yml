@@ -24,8 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Train a small model so the image has something to serve
-        run: |
-	  pip install -e ".[dev]"          
+        run: 
+	        pip install -e ".[dev]"          
           python scripts/ci_train_stub.py
       - uses: docker/setup-buildx-action@v3
       - name: Build image
