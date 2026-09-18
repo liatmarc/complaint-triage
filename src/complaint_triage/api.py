@@ -32,6 +32,8 @@ from .guardrails import redact_pii
 MODEL_PATH = Path(os.getenv("MODEL_PATH", MODELS_DIR / "tfidf_logreg.joblib"))
 LOG_PATH = Path(os.getenv("LOG_PATH", C.ROOT / "logs" / "predictions.jsonl"))
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
+# Public demo protection: cap LLM spend per UTC day (in-memory, resets on restart).
+DAILY_DRAFT_BUDGET_USD = float(os.getenv("DAILY_DRAFT_BUDGET_USD", "0.50"))
 VERSION = os.getenv("APP_VERSION", "0.1.0")
 
 STATE: dict = {}
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
     STATE["model"] = TfidfLogReg.load(MODEL_PATH)
     STATE["started"] = time.time()
     STATE["drafter"] = None   # lazy: only if an API key is present and /draft is called
+    STATE["spend"] = {"day": time.strftime("%Y-%m-%d", time.gmtime()), "usd": 0.0}
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     yield
     STATE.clear()
@@ -102,6 +105,15 @@ def _log(event: dict) -> None:
         pass   # logging must never break a request
 
 
+def _check_budget() -> None:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    sp = STATE["spend"]
+    if sp["day"] != today:
+        sp["day"], sp["usd"] = today, 0.0
+    if sp["usd"] >= DAILY_DRAFT_BUDGET_USD:
+        raise HTTPException(429, f"daily drafting budget (${DAILY_DRAFT_BUDGET_USD:.2f}) reached; try again tomorrow")
+
+
 def _drafter():
     if STATE.get("drafter") is None:
         if not os.getenv("ANTHROPIC_API_KEY"):
@@ -118,7 +130,8 @@ def _drafter():
 def health():
     return {"status": "ok", "version": VERSION, "model": MODEL_PATH.name,
             "n_classes": len(STATE["model"].classes_), "uptime_s": round(time.time() - STATE["started"], 1),
-            "drafting_enabled": bool(os.getenv("ANTHROPIC_API_KEY"))}
+            "drafting_enabled": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "draft_spend_today_usd": round(STATE["spend"]["usd"], 4), "daily_draft_budget_usd": DAILY_DRAFT_BUDGET_USD}
 
 
 @app.post("/predict", response_model=PredictOut)
@@ -138,7 +151,9 @@ def draft(body: ComplaintIn):
     text, pii = redact_pii(body.narrative)
     p = _predict(text)
     pred_latency = (time.time() - t0) * 1000
+    _check_budget()
     res = _drafter().draft(text, p.product, case_ref=body.case_ref or "NB-000000")
+    STATE["spend"]["usd"] += res.cost_usd
     flag = p.needs_review or not res.citations["ok"]
     _log({"endpoint": "draft", "product": p.product, "confidence": p.confidence, "needs_review": p.needs_review,
           "citation_ok": res.citations["ok"], "flag_for_review": flag, "latency_ms": round(pred_latency, 2),

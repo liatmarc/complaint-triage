@@ -81,3 +81,13 @@ def test_psi_and_monitor(tmp_path, monkeypatch):
     rep = monitor_report(log)
     assert rep["n_requests"] == 3 and rep["drift_status"] == "stable"
     assert rep["share_needs_review"] == pytest.approx(1 / 3, abs=1e-3)
+
+
+def test_draft_budget_enforced(client, monkeypatch):
+    from complaint_triage.drafting import Drafter
+    api_mod.STATE["drafter"] = Drafter(client=FakeClient("Dear Customer, we will follow up [1]."), k=12)
+    monkeypatch.setattr(api_mod, "DAILY_DRAFT_BUDGET_USD", 0.001)
+    body = {"narrative": "my mortgage escrow payment went up and nobody explained why to me"}
+    assert client.post("/draft", json=body).status_code == 200      # first call spends ~$0.0018
+    assert client.post("/draft", json=body).status_code == 429      # budget now exceeded
+    assert client.get("/health").json()["draft_spend_today_usd"] > 0
