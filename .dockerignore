@@ -1,0 +1,14 @@
+.venv/
+.git/
+data/raw/
+data/processed/
+reports/
+mlflow.db
+mlruns/
+logs/
+transformer_out*/
+tests/
+scripts/
+.env
+__pycache__/
+*.egg-info/

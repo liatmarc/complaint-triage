@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Complaint Triage</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --accent:#2f5d8a; --warn:#b4531b; --ok:#2d7a4f; --border:#e2e2dd; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#a0a09a; --card:#1f1f1e; --border:#33332f; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:920px; margin:0 auto; padding:2rem 1rem; }
+  h1 { font-size:1.5rem; margin:0 0 .25rem; } .sub { color:var(--muted); margin:0 0 1.5rem; }
+  textarea { width:100%; min-height:160px; padding:.75rem; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--fg); font:inherit; box-sizing:border-box; }
+  .row { display:flex; gap:.5rem; margin:.75rem 0 1.5rem; flex-wrap:wrap; }
+  button { padding:.6rem 1.1rem; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem 1.25rem; margin-bottom:1rem; }
+  .card h2 { font-size:1rem; margin:0 0 .5rem; }
+  .badge { display:inline-block; padding:.15rem .55rem; border-radius:999px; font-size:.8rem; border:1px solid; }
+  .badge.warn { color:var(--warn); border-color:var(--warn); } .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .bar { height:8px; background:var(--border); border-radius:4px; overflow:hidden; margin:.25rem 0 .5rem; }
+  .bar > div { height:100%; background:var(--accent); }
+  .top3 { display:grid; grid-template-columns: 1fr auto; gap:.15rem .75rem; font-size:.9rem; }
+  pre { white-space:pre-wrap; font:inherit; margin:0; }
+  details { margin-top:.5rem; } summary { cursor:pointer; color:var(--muted); }
+  .evidence { font-size:.85rem; color:var(--muted); margin:.5rem 0; }
+  .meta { color:var(--muted); font-size:.85rem; }
+  .error { color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Complaint Triage</h1>
+  <p class="sub">Paste a consumer complaint. The classifier routes it to a product team; the drafter writes a grounded first response for an agent to review.</p>
+
+  <textarea id="narrative" placeholder="e.g. Someone withdrew $500 from my checking account that I did not authorize. I reported it to the bank two weeks ago and have heard nothing back."></textarea>
+  <div class="row">
+    <button id="predictBtn">Route only</button>
+    <button id="draftBtn" class="secondary">Route + draft response</button>
+    <span id="status" class="meta"></span>
+  </div>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const out = $("out");
+
+async function call(path) {
+  const narrative = $("narrative").value.trim();
+  if (narrative.length < 20) { out.innerHTML = '<p class="error">Please enter at least 20 characters.</p>'; return; }
+  $("predictBtn").disabled = $("draftBtn").disabled = true;
+  $("status").textContent = path === "/draft" ? "Routing and drafting (a few seconds)..." : "Routing...";
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ narrative }) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    render(data, path === "/draft");
+  } catch (e) {
+    out.innerHTML = `<p class="error">${e.message}</p>`;
+  } finally {
+    $("predictBtn").disabled = $("draftBtn").disabled = false;
+    $("status").textContent = "";
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function render(d, withDraft) {
+  const pct = Math.round(d.confidence * 100);
+  let html = `<div class="card">
+    <h2>Routed to: ${esc(d.product)} <span class="badge ${d.needs_review ? "warn" : "ok"}">${d.needs_review ? "low confidence – human review" : "confident"}</span></h2>
+    <div class="bar"><div style="width:${pct}%"></div></div>
+    <div class="top3">${d.top3.map(([p, c]) => `<span>${esc(p)}</span><span>${Math.round(c * 100)}%</span>`).join("")}</div>
+    <p class="meta">${d.latency_ms} ms · threshold ${d.threshold}${Object.keys(d.pii_redacted).length ? " · PII redacted: " + esc(JSON.stringify(d.pii_redacted)) : ""}</p>
+  </div>`;
+  if (withDraft) {
+    const cc = d.citation_check;
+    html += `<div class="card">
+      <h2>Draft response <span class="badge ${d.flag_for_review ? "warn" : "ok"}">${d.flag_for_review ? "flagged – verify numbers" : "citations check out"}</span></h2>
+      <pre>${esc(d.draft)}</pre>
+      <p class="meta">${esc(d.draft_model)} · $${d.draft_cost_usd.toFixed(4)} · ${d.draft_latency_ms} ms · cited ${esc(JSON.stringify(cc.cited))}${cc.unsupported_timelines.length ? " · unsupported: " + esc(cc.unsupported_timelines.join(", ")) : ""}</p>
+      <details><summary>Policy excerpts provided (${d.evidence.length})</summary>
+        ${d.evidence.map((c, i) => `<p class="evidence"><b>[${i + 1}] ${esc(c.title)}</b><br>${esc(c.text)}</p>`).join("")}
+      </details>
+    </div>`;
+  }
+  out.innerHTML = html;
+}
+
+$("predictBtn").onclick = () => call("/predict");
+$("draftBtn").onclick = () => call("/draft");
+</script>
+</body>
+</html>
