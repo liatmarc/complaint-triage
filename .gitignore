@@ -10,8 +10,7 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-models/*
-!models/tfidf_logreg.joblib
+models/
 mlflow.db
 mlruns/
 logs/
@@ -24,4 +23,5 @@ reports/phase4/*
 !reports/phase2/decision.md
 !reports/phase3/decision.md
 !reports/phase3/summary.md
+!reports/writeup.md
 *.zip

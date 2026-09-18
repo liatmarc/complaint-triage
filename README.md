@@ -1,166 +1,132 @@
-# Complaint Triage — end-to-end Applied AI project
+# Complaint Triage — from public data to a deployed, monitored AI service
 
-Route incoming consumer complaints to the right product team (ML classification)
-and draft a grounded first response (LLM + RAG), deployed as a monitored API.
+[![CI](https://github.com/liatmarc/complaint-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/liatmarc/complaint-triage/actions/workflows/ci.yml)
+**Live demo:** https://complaint-triage.onrender.com · **API docs:** https://complaint-triage.onrender.com/docs
 
-Data: [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/)
-— millions of real complaints, public, no signup.
+Consumer complaints arrive as free text. This service routes each one to the right
+product team (ML classification) and drafts a grounded first response for an agent
+to review (LLM + retrieval), with the guardrails, evaluation and monitoring needed
+to run it for real.
 
-| Phase | Status | What it proves |
+Built end to end on the public [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/):
+data pipeline → baseline vs. transformer → RAG drafting with an evaluated
+hallucination rate → FastAPI + Docker + CI → cloud deployment with drift monitoring.
+
+> The free hosting tier sleeps after 15 minutes idle; the first request may take
+> ~45 s to wake. Drafting is capped at $0.50 of LLM spend per day.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[Complaint text] --> R[PII redaction]
+    R --> C[TF-IDF + LogReg<br/>11 products]
+    C -->|product, confidence| G{confidence < 0.6?}
+    G -->|yes| H[Human review queue]
+    C --> K[Retrieve product page<br/>policy corpus]
+    K --> L[Claude Haiku<br/>draft with citations]
+    L --> V[Citation / timeline check]
+    V -->|pass or flagged| A[Agent reviews & sends]
+    C -.-> M[(prediction log)]
+    V -.-> M
+    M --> D[Drift PSI · latency · spend]
+```
+
+## Results
+
+**Routing** — time-based test set, 4,828 complaints, 11 products
+
+| Model | Test macro-F1 | Test acc | Log loss | Inference | Training |
+|---|---|---|---|---|---|
+| **TF-IDF word+char n-grams + LogReg** (shipped) | **0.757** | 0.816 | **0.599** | **1.7 ms/row (CPU)** | 285 s (laptop CPU) |
+| DistilBERT fine-tuned, tuned (512 tok, 3 ep) | 0.756 | 0.821 | 0.614 | 4.3 ms/row (T4 GPU) | 1,394 s (T4 GPU) |
+
+Manual review of the 50 most confident errors: 40 were defensible alternative
+labels (complaints that span two products), 2 ambiguous texts, 8 model mistakes —
+so the headroom is mostly in the labels. Accuracy rises with narrative length
+(72% under 200 chars → 85% over 2,000); fintech companies (Block, PayPal) are
+hardest because their products straddle CFPB categories. Full reasoning in
+[`reports/phase2/decision.md`](reports/phase2/decision.md).
+
+**Drafting** — 100 stratified test complaints, judged by a different model (Claude Sonnet)
+
+| Condition | Grounding (1–5) | Hallucination rate | Citation check pass | $/draft |
+|---|---|---|---|---|
+| No retrieval | 1.70 | 98% | 0% | 0.002 |
+| Top-4 BM25 chunks | 3.24 | 70% | 54% | 0.002 |
+| Whole product page | 3.52 | 51% | 75% | 0.003 |
+| **+ cite-the-source prompt** (shipped) | **3.80** | **41%** | **77%** | 0.003 |
+
+Judge agreed with a 20-draft manual spot check on 19/20. Drafts are therefore
+delivered *to an agent*, not sent automatically; the deterministic citation check
+(80% hallucination when it fails vs. 24% when it passes) flags which drafts need
+closer scrutiny. Details in [`reports/phase3/decision.md`](reports/phase3/decision.md).
+
+## What's in the box
+
+| Phase | What it proves | Key files |
 |---|---|---|
-| 1. Data & framing | done | data engineering, validation, honest evaluation design |
-| 2. Baselines & modeling | done | ML fundamentals, experiment tracking, error analysis |
-| 3. LLM / RAG layer | done | LLM engineering and evaluation |
-| 4. Deployment | service, Docker, CI done; hosting next | FastAPI, Docker, CI, monitoring |
-| 5. Communication | | write-up, architecture, trade-offs |
+| 1. Data | streaming ingest of a multi-GB CSV, pandera schema contract, data card, **temporal** split with leakage guard | `ingest.py` `schema.py` `profile.py` `split.py` |
+| 2. Modelling | MLflow-tracked baseline vs. transformer, shared evaluation, calibration, hand error analysis, exact linear explanations, slice analysis | `baseline.py` `evaluate.py` `explain.py` `colab_train.py` |
+| 3. Applied AI | product-filtered retrieval, PII redaction, citation/timeline check, 4-condition ablation, LLM-as-judge with measured reliability, cost tracking | `retrieval.py` `guardrails.py` `drafting.py` `llm_eval.py` `data/corpus/` |
+| 4. Deployment | typed FastAPI + UI, multi-stage non-root Docker image, CI with container smoke test, auto-deploy, PSI drift + latency monitoring, daily spend cap | `api.py` `monitoring.py` `Dockerfile` `.github/workflows/ci.yml` |
+| 5. Communication | this README, decision records, one-page write-up | `reports/` |
 
-## Setup
-
-```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-pytest                                               # 4 tests, runs on synthetic data
-```
-
-## Phase 1 — run it
+## Run it yourself
 
 ```bash
-# Quick dev run: download (~1-2 GB), keep the first ~50k usable rows
-python scripts/phase1.py all --max-rows 50000
+git clone https://github.com/liatmarc/complaint-triage && cd complaint-triage
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -e ".[dev]" && pytest                      # 21 tests, no data or keys needed
 
-# Full run (all narratives, ~1M+ rows, a few minutes)
-python scripts/phase1.py all
+python scripts/phase1.py all --max-rows 50000          # download CFPB data, clean, profile, split
+python scripts/phase2.py baseline && python scripts/phase2.py compare
+python scripts/phase2.py explain && python scripts/phase2.py slices
+
+cp .env.example .env                                   # add ANTHROPIC_API_KEY
+python scripts/phase3.py demo                          # one grounded draft with evidence
+python scripts/phase3.py build-eval-set-cmd && python scripts/phase3.py generate --k 12 --condition rag_v3 --skip-no-rag
+python scripts/phase3.py judge --condition rag_v3 --no-no-rag && python scripts/phase3.py summarize-cmd --conditions rag_v3
+
+python scripts/phase4.py serve                         # http://127.0.0.1:8000
+docker build -t complaint-triage . && docker run --rm -p 8000:8000 --env-file .env complaint-triage
+python scripts/phase4.py monitor                       # drift / latency / spend from the prediction log
 ```
 
-Or step by step: `download-cmd`, `clean`, `profile`, `split`.
+Transformer fine-tuning runs on a free Colab GPU (`scripts/colab_train.py`);
+predictions are scored locally with the same evaluator as the baseline.
 
-Outputs:
+## Decisions I'd defend in an interview
 
-```
-data/processed/complaints_clean.parquet   validated, deduplicated, narratives only
-data/processed/{train,val,test}.parquet   time-based split
-data/processed/split_meta.json            date ranges, class list, dropped classes
-reports/data_card.md + *.png              class balance, text length, volume, label drift
-```
+- **Time-based split, not random.** Production scores the future; a random split
+  leaks vocabulary and category trends and overstates accuracy.
+- **Shipped the simpler model.** DistilBERT tied the baseline at 5× the training
+  cost and 2.5× the latency, and error review showed the ceiling is in the labels.
+- **Retrieval recall before ranking.** The corpus is small enough to give the model
+  the entire product page; that beat top-k BM25 by 19 points of hallucination.
+- **Human-in-the-loop, with evidence.** 41% hallucination is too high to auto-send,
+  so the product is a draft plus its excerpts plus a flag, not an autoresponder.
+- **Measure the judge.** An LLM judge is only as good as its agreement with humans;
+  a spot check caught it silently failing on two-thirds of rows and corrected the
+  headline number from 32% to 51%.
 
-## Phase 2 — run it
+## Limitations and next steps
 
-```bash
-python scripts/phase2.py baseline            # TF-IDF + logistic regression, ~1 min on CPU
-python scripts/phase2.py compare             # all runs side by side
-python scripts/phase2.py explain             # top n-grams per class + per-prediction contributions
-python scripts/phase2.py slices              # accuracy by narrative length, company, channel
-mlflow ui --backend-store-uri sqlite:///mlflow.db   # open http://127.0.0.1:5000
-```
-
-Outputs: `models/tfidf_logreg.joblib`, `reports/phase2/*` (confusion matrix,
-calibration plot, per-row predictions, the 50 most confident errors as CSV),
-and every param/metric/artifact logged to MLflow (`mlflow.db`).
-
-### Transformer (GPU via Google Colab)
-
-No local GPU is needed. In Colab (Runtime -> Change runtime type -> T4 GPU):
-
-1. Upload `scripts/colab_train.py` and, from `data/processed/`, the files
-   `train.parquet`, `val.parquet`, `test.parquet`, `split_meta.json`.
-2. Run:
-   ```
-   !pip -q install transformers datasets accelerate pyarrow scikit-learn
-   !python colab_train.py --data-dir . --out-dir transformer_out
-   !zip -r transformer_out.zip transformer_out
-   ```
-3. Download `transformer_out.zip`, extract it into the repo, then:
-   ```bash
-   python scripts/phase2.py log-transformer-cmd transformer_out
-   python scripts/phase2.py compare
-   ```
-Scoring happens locally with the same `evaluate()` as the baseline.
-
-## Phase 3 — run it
-
-Needs an Anthropic API key. Copy `.env.example` to `.env` and fill in the key.
-
-```bash
-python scripts/phase3.py check-key          # one tiny call
-python scripts/phase3.py demo               # draft one response, show retrieved evidence
-python scripts/phase3.py build-eval-set-cmd # 100 stratified test complaints
-python scripts/phase3.py generate           # drafts with & without retrieval (~$0.30)
-python scripts/phase3.py judge              # LLM-as-judge, different model (~$0.80)
-python scripts/phase3.py summarize-cmd      # reports/phase3/summary.md + spot-check file
-```
-
-Pipeline: redact PII -> classifier predicts product -> BM25 retrieval over a
-policy corpus (`data/corpus/`, a fictional institution's playbook grounded in
-FCRA / FDCPA / Reg E / Reg Z / RESPA) filtered to that product -> Claude Haiku
-drafts with inline citations -> deterministic citation check (every "N days"
-must appear in a cited chunk). Evaluation: 100 drafts with and without
-retrieval, scored by Claude Sonnet on accuracy / grounding / tone +
-hallucination flag, plus a 20-draft manual spot check.
-
-## Phase 4 — run it
-
-```bash
-python scripts/phase4.py serve            # http://127.0.0.1:8000  (UI at /, OpenAPI docs at /docs)
-python scripts/phase4.py smoke            # in a second terminal
-python scripts/phase4.py load --n 200     # latency percentiles over real test complaints
-python scripts/phase4.py monitor          # drift (PSI), confidence, latency from the prediction log
-
-docker build -t complaint-triage .
-docker run --rm -p 8000:8000 --env-file .env complaint-triage
-```
-
-Endpoints: `GET /health`, `POST /predict` (product, confidence, top-3, `needs_review`
-if confidence < 0.6), `POST /draft` (predict + grounded draft + citation check +
-`flag_for_review`). PII is redacted before anything is logged or sent to the LLM.
-Every request is appended to `logs/predictions.jsonl`; `monitor` computes a
-Population Stability Index between live predictions and the training label
-distribution (<0.1 stable, >0.25 investigate).
-
-CI (`.github/workflows/ci.yml`): lint + 20 tests on every push, then builds the
-Docker image with a stub model and smoke-tests `/health` and `/predict` inside the
-container. No real data or API keys are needed in CI.
-
-## Design decisions (Phase 1)
-
-- **Stream, don't load.** The raw CSV is several GB; `ingest.py` reads it in
-  200k-row chunks and appends to a zstd-compressed Parquet.
-- **Schema as a contract.** `schema.py` (pandera) validates every chunk:
-  unique IDs, plausible dates, minimum narrative length, no surprise columns.
-- **Temporal split.** Train on the past, validate on the recent past, test on
-  the most recent 10%. A random split would leak future vocabulary and category
-  trends and overstate accuracy.
-- **Rare classes dropped** (< 50 training examples) and recorded in
-  `split_meta.json` so the decision is auditable.
-- **Data card**, not just a notebook: a reviewer can read one markdown file and
-  know the dataset's size, imbalance, drift and caveats.
+- Trained on a ~51k-row recent slice; the full 1.5M-row dataset would likely favour
+  the transformer. The pipeline re-runs at full scale with no code changes.
+- The policy corpus is a fictional playbook grounded in real federal rules
+  (FDCPA, Reg E, Reg Z, RESPA, FCRA); a real deployment would index the
+  institution's own procedures.
+- Next: structured per-claim citations to push hallucination below 20%, a
+  retraining job triggered by the PSI drift alert, and a small labelled set of
+  agent edits to measure how much time the drafts actually save.
 
 ## Layout
 
 ```
-src/complaint_triage/
-  config.py    paths, URL, column names (single source of truth)
-  ingest.py    download + chunked clean -> Parquet
-  schema.py    pandera data contract
-  profile.py   figures + data card
-  split.py     temporal split
-  evaluate.py  model-agnostic metrics, confusion/calibration plots, error sample
-  baseline.py  TF-IDF + logistic regression with MLflow tracking
-scripts/phase1.py   Phase 1 CLI
-  transformer_log.py  score Colab predictions locally, log to MLflow
-  explain.py   exact linear-model explanations + slice analysis
-  retrieval.py chunking + BM25 retrieval with product filter
-  guardrails.py PII redaction, citation / timeline check
-  drafting.py  LLM drafting with cost + latency tracking
-  llm_eval.py  eval set, ablation, LLM-as-judge, summary
-data/corpus/        policy playbook (12 markdown files)
-  api.py       FastAPI service + request logging
-  ui.html      minimal browser UI
-  monitoring.py PSI drift, confidence, latency report
-scripts/phase3.py   Phase 3 CLI
-scripts/phase4.py   serve / smoke / load / monitor
-Dockerfile          multi-stage, CPU-only, non-root
-.github/workflows/ci.yml
-scripts/phase2.py   Phase 2 CLI
-scripts/colab_train.py  standalone DistilBERT fine-tune (GPU)
-tests/              synthetic-data tests
+src/complaint_triage/   pipeline, models, RAG, API, monitoring (one module per concern)
+scripts/                phase1..phase4 CLIs, Colab trainer, CI stub
+tests/                  21 offline tests (synthetic data, fake LLM client)
+data/corpus/            policy playbook (12 markdown pages)
+reports/                data card, decision records, evaluation summaries
 ```
