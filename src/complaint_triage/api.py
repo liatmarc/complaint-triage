@@ -18,11 +18,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-
-from dotenv import load_dotenv
 
 from . import config as C
 
