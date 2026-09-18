@@ -19,17 +19,17 @@ hallucination rate → FastAPI + Docker + CI → cloud deployment with drift mon
 
 ```mermaid
 flowchart LR
-    U[Complaint text] --> R[PII redaction]
-    R --> C[TF-IDF + LogReg<br/>11 products]
-    C -->|product, confidence| G{confidence < 0.6?}
-    G -->|yes| H[Human review queue]
-    C --> K[Retrieve product page<br/>policy corpus]
-    K --> L[Claude Haiku<br/>draft with citations]
-    L --> V[Citation / timeline check]
-    V -->|pass or flagged| A[Agent reviews & sends]
-    C -.-> M[(prediction log)]
+    U["Complaint text"] --> R["PII redaction"]
+    R --> C["TF-IDF + LogReg, 11 products"]
+    C -->|"product, confidence"| G{"confidence below 0.6?"}
+    G -->|yes| H["Human review queue"]
+    C --> K["Retrieve product page from policy corpus"]
+    K --> L["Claude Haiku drafts with citations"]
+    L --> V["Citation and timeline check"]
+    V -->|"pass or flagged"| A["Agent reviews and sends"]
+    C -.-> M[("prediction log")]
     V -.-> M
-    M --> D[Drift PSI · latency · spend]
+    M --> D["Drift PSI, latency, spend"]
 ```
 
 ## Results
