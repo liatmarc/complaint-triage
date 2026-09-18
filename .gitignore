@@ -10,7 +10,8 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-models/
+models/*
+!models/tfidf_logreg.joblib
 mlflow.db
 mlruns/
 logs/

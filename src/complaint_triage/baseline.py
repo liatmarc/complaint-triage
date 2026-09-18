@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 
 import joblib
-import mlflow
 import numpy as np
 import pandas as pd
 from scipy.sparse import hstack
@@ -65,6 +64,8 @@ class TfidfLogReg:
 
 
 def train_baseline(run_name: str = "tfidf_logreg", **model_kwargs) -> dict:
+    import mlflow  # heavy; only needed for training, never in the API
+
     mlflow.set_tracking_uri(MLFLOW_URI)
     mlflow.set_experiment("complaint-triage")
 
